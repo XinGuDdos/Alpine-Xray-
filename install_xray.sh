@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Xray 一键安装脚本 for Alpine Linux
+# Xray 一键安装脚本 for Alpine Linux and Debian-based systems
 # 默认安装最新版本的 Xray，并配置为开机启动
 # Host 域名和 WebSocket 路径无默认值，必须输入非空值
 # 安装完成后生成 VMess 配置链接
@@ -11,16 +11,31 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
-# 确保系统是 Alpine Linux
-if ! grep -qi "alpine" /etc/os-release; then
-    echo "Error: This script is designed for Alpine Linux"
+# 检测操作系统
+OS=""
+if grep -qi "alpine" /etc/os-release; then
+    OS="alpine"
+elif grep -qi "debian\|ubuntu" /etc/os-release; then
+    OS="debian"
+else
+    echo "Error: This script is designed for Alpine Linux or Debian-based systems"
     exit 1
 fi
+echo "Detected OS: $OS"
 
 # 安装必要的工具
 echo "Installing required packages..."
-apk update
-apk add --no-cache curl unzip jq openrc
+if [ "$OS" = "alpine" ]; then
+    apk update
+    apk add --no-cache curl unzip jq openrc
+elif [ "$OS" = "debian" ]; then
+    apt update
+    apt install -y curl unzip jq procps
+    # Ensure base64 is available (part of coreutils, but explicitly check)
+    if ! command -v base64 >/dev/null 2>&1; then
+        apt install -y coreutils
+    fi
+fi
 
 # 获取最新版本的 Xray
 echo "Fetching the latest Xray version..."
@@ -45,8 +60,13 @@ rm xray.zip
 chmod +x /usr/local/bin/xray
 
 # 创建 Xray 配置文件目录
-mkdir -p /usr/local/etc/xray
-CONFIG_FILE="/usr/local/etc/xray/config.json"
+if [ "$OS" = "alpine" ]; then
+    CONFIG_DIR="/usr/local/etc/xray"
+elif [ "$OS" = "debian" ]; then
+    CONFIG_DIR="/etc/xray"
+fi
+mkdir -p "$CONFIG_DIR"
+CONFIG_FILE="$CONFIG_DIR/config.json"
 
 # 交互式输入配置参数
 echo "Configuring Xray..."
@@ -80,7 +100,7 @@ CLIENT_ID=$(cat /proc/sys/kernel/random/uuid)
 echo "Generated client ID: $CLIENT_ID"
 
 # 创建配置文件
-cat << EOF > $CONFIG_FILE
+cat << EOF > "$CONFIG_FILE"
 {
   "log": null,
   "routing": {
@@ -168,16 +188,17 @@ cat << EOF > $CONFIG_FILE
 EOF
 
 # 设置文件权限
-chmod 644 $CONFIG_FILE
+chmod 644 "$CONFIG_FILE"
 
 # 创建 Xray 服务
-echo "Creating Xray service for OpenRC..."
-cat << EOF > /etc/init.d/xray
+if [ "$OS" = "alpine" ]; then
+    echo "Creating Xray service for OpenRC..."
+    cat << EOF > /etc/init.d/xray
 #!/sbin/openrc-run
 
 name="xray"
 command="/usr/local/bin/xray"
-command_args="-config /usr/local/etc/xray/config.json"
+command_args="-config $CONFIG_FILE"
 pidfile="/run/xray.pid"
 command_background="yes"
 
@@ -190,22 +211,50 @@ start_pre() {
     checkpath -d -m 0755 -o root:root /run
 }
 EOF
+    chmod +x /etc/init.d/xray
+    # 启用开机启动
+    rc-update add xray default
+    # 启动 Xray 服务
+    echo "Starting Xray service..."
+    rc-service xray start
+    # 检查服务状态
+    if rc-service xray status | grep -q "started"; then
+        echo "Xray is running successfully."
+    else
+        echo "Error: Xray failed to start. Please check the configuration."
+        exit 1
+    fi
+elif [ "$OS" = "debian" ]; then
+    echo "Creating Xray service for systemd..."
+    cat << EOF > /etc/systemd/system/xray.service
+[Unit]
+Description=Xray Service
+After=network.target
 
-chmod +x /etc/init.d/xray
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray -config $CONFIG_FILE
+Restart=on-failure
+User=nobody
+Group=nogroup
 
-# 启用开机启动
-rc-update add xray default
-
-# 启动 Xray 服务
-echo "Starting Xray service..."
-rc-service xray start
-
-# 检查服务状态
-if rc-service xray status | grep -q "started"; then
-    echo "Xray is running successfully."
-else
-    echo "Error: Xray failed to start. Please check the configuration."
-    exit 1
+[Install]
+WantedBy=multi-user.target
+EOF
+    # 重新加载 systemd 配置
+    systemctl daemon-reload
+    # 启用开机启动
+    systemctl enable xray.service
+    # 启动 Xray 服务
+    echo "Starting Xray service..."
+    systemctl start xray.service
+    # 检查服务状态
+    if systemctl is-active --quiet xray.service; then
+        echo "Xray is running successfully."
+    else
+        echo "Error: Xray failed to start. Please check the configuration."
+        exit 1
+    fi
 fi
 
 # 生成 VMess 配置链接
@@ -228,7 +277,11 @@ EOF
 )
 
 # 对 JSON 进行 base64 编码
-VMESS_BASE64=$(echo "$VMESS_JSON" | jq -c . | base64 -w 0)
+if [ "$OS" = "alpine" ]; then
+    VMESS_BASE64=$(echo "$VMESS_JSON" | jq -c . | base64 -w 0)
+elif [ "$OS" = "debian" ]; then
+    VMESS_BASE64=$(echo "$VMESS_JSON" | jq -c . | base64 -w 0)
+fi
 VMESS_LINK="vmess://$VMESS_BASE64"
 
 echo "Xray installation and configuration completed!"
