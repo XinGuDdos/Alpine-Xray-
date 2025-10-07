@@ -110,3 +110,4 @@
     "error": "/var/log/xray/error.log"
   }
   ```
+  Nat使用CDN处 主机名等于域名转发到端口
